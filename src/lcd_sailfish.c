@@ -4,25 +4,24 @@
 // Copyright (C) 2018  Kevin O'Connor <kevin@koconnor.net>
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
-
-/* LiquidCrystalSerial
- *
- * This is an implementation of communciation routines for the
- * Makerbot OEM display hardware.
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>
- */
+//
+// SailfishLCD:
+// 
+// This is an implementation of communciation routines for the
+// Makerbot OEM display hardware.
+//  
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//  
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//  
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>
 
 #include "autoconf.h"   // CONFIG_CLOCK_FREQ
 #include "basecmd.h"    // oid_alloc
@@ -42,23 +41,8 @@ struct sailfish_lcd
   struct gpio_out strobe, data, clk;
 };
 
-static void
-sailfish_lcd_pulse_enable(struct sailfish_lcd *h, uint8_t value);
-
-static void
-sailfish_lcd_write_4bits(struct sailfish_lcd *h, uint8_t value, bool dataMode);
-
-static void
-sailfish_lcd_write_serial(struct sailfish_lcd *h, uint8_t value);
-
-static void
-sailfish_lcd_begin(struct sailfish_lcd *h);
-
-static void
-sailfish_lcd_send(struct sailfish_lcd *h, uint8_t value, bool mode);
-
 /****************************************************************
- * Transmit functions
+Transmit functions
  ****************************************************************/
 
 static uint32_t
@@ -77,6 +61,66 @@ usdelay(uint32_t usecs)
     while (timer_is_before(timer_read_time(), end))
         irq_poll();
 }
+
+/************ low level data pushing commands **********/
+
+static void
+sailfish_lcd_write_serial(struct sailfish_lcd *h, uint8_t value)
+{
+  for (int8_t i = 7; i >= 0; i--)
+  {
+    gpio_out_write(h->clk, LOW);
+    bool data = (value >> i) & 0x01 ? true : false;
+    gpio_out_write(h->data, data);
+    gpio_out_write(h->clk, HIGH);
+    usdelay(1);
+  }
+  gpio_out_write(h->strobe, HIGH);
+  usdelay(1);
+  gpio_out_write(h->strobe, LOW);
+}
+
+static void
+sailfish_lcd_pulse_enable(struct sailfish_lcd *h, uint8_t value)
+{
+  usdelay(1);
+  // set enable to true, on standard hardware it is 0b1000
+  value |= 0b01000;
+  sailfish_lcd_write_serial(h, value);
+  usdelay(1); // enable pulse must be >450ns
+  // set enable to false
+  value &= 0b11110111;
+  sailfish_lcd_write_serial(h, value);
+  usdelay(1); // commands need > 37us to settle [citation needed]
+}
+
+static void
+sailfish_lcd_write_4bits(struct sailfish_lcd *h, uint8_t value, bool dataMode)
+{
+  // On the standard hardware, the top 4 bits are the data lines
+  uint8_t bits = value << 4;
+
+  // Is it a command or data (register select)
+  // On standard hardware, the register select is 0b0010
+  if (dataMode)
+    bits |= 0b0010;
+
+  // Send the data
+  sailfish_lcd_pulse_enable(h, bits);
+}
+
+// write either command or data, with automatic 4/8-bit selection
+static void
+sailfish_lcd_send(struct sailfish_lcd *h, uint8_t value, bool mode)
+{
+  // serial assumes 4 bit mode
+  sailfish_lcd_write_4bits(h, (value >> 4), mode);
+  sailfish_lcd_write_4bits(h, (value & 0x0F), mode);
+}
+
+/****************************************************************
+Interface
+ ****************************************************************/
 
 // Initialization of a standard HD44780 display
 static void
@@ -108,66 +152,6 @@ sailfish_lcd_begin(struct sailfish_lcd *h)
   // finally, set to 8-bit interface
   sailfish_lcd_write_4bits(h, 0x02, false);
 }
-
-/************ low level data pushing commands **********/
-
-// write either command or data, with automatic 4/8-bit selection
-static void
-sailfish_lcd_send(struct sailfish_lcd *h, uint8_t value, bool mode)
-{
-  // serial assumes 4 bit mode
-  sailfish_lcd_write_4bits(h, (value >> 4), mode);
-  sailfish_lcd_write_4bits(h, (value & 0x0F), mode);
-}
-
-static void
-sailfish_lcd_write_4bits(struct sailfish_lcd *h, uint8_t value, bool dataMode)
-{
-  // On the standard hardware, the top 4 bits are the data lines
-  uint8_t bits = value << 4;
-
-  // Is it a command or data (register select)
-  // On standard hardware, the register select is 0b0010
-  if (dataMode)
-    bits |= 0b0010;
-
-  // Send the data
-  sailfish_lcd_pulse_enable(h, bits);
-}
-
-static void
-sailfish_lcd_pulse_enable(struct sailfish_lcd *h, uint8_t value)
-{
-  usdelay(1);
-  // set enable to true, on standard hardware it is 0b1000
-  value |= 0b01000;
-  sailfish_lcd_write_serial(h, value);
-  usdelay(1); // enable pulse must be >450ns
-  // set enable to false
-  value &= 0b11110111;
-  sailfish_lcd_write_serial(h, value);
-  usdelay(1); // commands need > 37us to settle [citation needed]
-}
-
-static void
-sailfish_lcd_write_serial(struct sailfish_lcd *h, uint8_t value)
-{
-  for (int8_t i = 7; i >= 0; i--)
-  {
-    gpio_out_write(h->clk, LOW);
-    bool data = (value >> i) & 0x01 ? true : false;
-    gpio_out_write(h->data, data);
-    gpio_out_write(h->clk, HIGH);
-    usdelay(1);
-  }
-  gpio_out_write(h->strobe, HIGH);
-  usdelay(1);
-  gpio_out_write(h->strobe, LOW);
-}
-
-/****************************************************************
- * Interface
- ****************************************************************/
 
 void
 command_config_sailfish_lcd(uint32_t *args)
